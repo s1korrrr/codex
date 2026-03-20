@@ -995,12 +995,18 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
     ShortcutDescriptor {
         id: ShortcutId::PasteImage,
         // Show Ctrl+Alt+V when running under WSL (terminals often intercept plain
-        // Ctrl+V); otherwise fall back to Ctrl+V.
+        // Ctrl+V), Command+V on macOS, and Ctrl+V elsewhere.
         bindings: &[
             ShortcutBinding {
                 key: key_hint::ctrl_alt(KeyCode::Char('v')),
                 condition: DisplayCondition::WhenUnderWSL,
             },
+            #[cfg(target_os = "macos")]
+            ShortcutBinding {
+                key: key_hint::super_(KeyCode::Char('v')),
+                condition: DisplayCondition::Always,
+            },
+            #[cfg(not(target_os = "macos"))]
             ShortcutBinding {
                 key: key_hint::ctrl(KeyCode::Char('v')),
                 condition: DisplayCondition::Always,
@@ -1704,7 +1710,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_image_shortcut_prefers_ctrl_alt_v_under_wsl() {
+    fn paste_image_shortcut_prefers_platform_specific_binding() {
         let descriptor = SHORTCUTS
             .iter()
             .find(|descriptor| descriptor.id == ShortcutId::PasteImage)
@@ -1723,6 +1729,8 @@ mod tests {
 
         let expected_key = if is_wsl {
             key_hint::ctrl_alt(KeyCode::Char('v'))
+        } else if cfg!(target_os = "macos") {
+            key_hint::super_(KeyCode::Char('v'))
         } else {
             key_hint::ctrl(KeyCode::Char('v'))
         };

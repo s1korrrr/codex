@@ -90,28 +90,7 @@ async fn start_review_conversation(
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
 ) -> Option<async_channel::Receiver<Event>> {
-    let config = ctx.config.clone();
-    let mut sub_agent_config = config.as_ref().clone();
-    // Carry over review-only feature restrictions so the delegate cannot
-    // re-enable blocked tools (web search, collab tools, view image).
-    if let Err(err) = sub_agent_config
-        .web_search_mode
-        .set(WebSearchMode::Disabled)
-    {
-        panic!("by construction Constrained<WebSearchMode> must always support Disabled: {err}");
-    }
-    let _ = sub_agent_config.features.disable(Feature::SpawnCsv);
-    let _ = sub_agent_config.features.disable(Feature::Collab);
-
-    // Set explicit review rubric for the sub-agent
-    sub_agent_config.base_instructions = Some(crate::REVIEW_PROMPT.to_string());
-    sub_agent_config.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
-
-    let model = config
-        .review_model
-        .clone()
-        .unwrap_or_else(|| ctx.model_info.slug.clone());
-    sub_agent_config.model = Some(model);
+    let sub_agent_config = build_review_sub_agent_config(ctx.as_ref());
     (run_codex_thread_one_shot(
         sub_agent_config,
         session.auth_manager(),
@@ -127,6 +106,42 @@ async fn start_review_conversation(
     .await)
         .ok()
         .map(|io| io.rx_event)
+}
+
+fn build_review_sub_agent_config(ctx: &TurnContext) -> crate::config::Config {
+    let mut config = ctx.config.as_ref().clone();
+    config.model = Some(ctx.model_info.slug.clone());
+    config.model_provider = ctx.provider.clone();
+    config.model_reasoning_effort = ctx.reasoning_effort;
+    config.model_reasoning_summary = Some(ctx.reasoning_summary);
+    config.developer_instructions = ctx.developer_instructions.clone();
+    config.compact_prompt = ctx.compact_prompt.clone();
+    config.permissions.shell_environment_policy = ctx.shell_environment_policy.clone();
+    config.codex_linux_sandbox_exe = ctx.codex_linux_sandbox_exe.clone();
+    config.cwd = ctx.cwd.clone();
+    config.permissions.sandbox_policy = ctx.sandbox_policy.clone();
+    config.permissions.file_system_sandbox_policy = ctx.file_system_sandbox_policy.clone();
+    config.permissions.network_sandbox_policy = ctx.network_sandbox_policy;
+
+    // Carry over review-only feature restrictions so the delegate cannot
+    // re-enable blocked tools (web search, collab tools, view image).
+    if let Err(err) = config.web_search_mode.set(WebSearchMode::Disabled) {
+        panic!("by construction Constrained<WebSearchMode> must always support Disabled: {err}");
+    }
+    let _ = config.features.disable(Feature::SpawnCsv);
+    let _ = config.features.disable(Feature::Collab);
+
+    // Set explicit review rubric for the sub-agent and keep review turns
+    // approval-free even when the parent turn is interactive.
+    config.base_instructions = Some(crate::REVIEW_PROMPT.to_string());
+    config.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
+
+    let model = config
+        .review_model
+        .clone()
+        .unwrap_or_else(|| ctx.model_info.slug.clone());
+    config.model = Some(model);
+    config
 }
 
 async fn process_review_events(
@@ -270,4 +285,83 @@ pub(crate) async fn exit_review_mode(
     // materialize rollout persistence. Do this after emitting review output so
     // file creation + git metadata collection cannot delay client-facing items.
     session.ensure_rollout_materialized().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_review_sub_agent_config;
+    use crate::codex::make_session_and_context;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::SandboxPolicy;
+    use pretty_assertions::assert_eq;
+    use std::path::PathBuf;
+
+    fn pick_runtime_sandbox(
+        constraint: &crate::config::Constrained<SandboxPolicy>,
+        base: SandboxPolicy,
+    ) -> SandboxPolicy {
+        let candidates = [
+            SandboxPolicy::DangerFullAccess,
+            SandboxPolicy::new_workspace_write_policy(),
+            SandboxPolicy::new_read_only_policy(),
+        ];
+        candidates
+            .into_iter()
+            .find(|candidate| *candidate != base && constraint.can_set(candidate).is_ok())
+            .unwrap_or(base)
+    }
+
+    #[tokio::test]
+    async fn build_review_sub_agent_config_uses_turn_runtime_sandbox_state() {
+        let (_session, mut turn) = make_session_and_context().await;
+        let runtime_sandbox = pick_runtime_sandbox(
+            &turn.config.permissions.sandbox_policy,
+            turn.config.permissions.sandbox_policy.get().clone(),
+        );
+        let runtime_cwd = tempfile::tempdir().expect("temp dir");
+        let runtime_cwd_path = runtime_cwd.path().to_path_buf();
+        let expected_file_system_sandbox_policy =
+            FileSystemSandboxPolicy::from_legacy_sandbox_policy(
+                &runtime_sandbox,
+                &runtime_cwd_path,
+            );
+        let expected_network_sandbox_policy = NetworkSandboxPolicy::from(&runtime_sandbox);
+        turn.cwd = runtime_cwd_path.clone();
+        turn.sandbox_policy = turn.config.permissions.sandbox_policy.clone();
+        turn.sandbox_policy
+            .set(runtime_sandbox.clone())
+            .expect("runtime sandbox policy set");
+        turn.file_system_sandbox_policy = expected_file_system_sandbox_policy.clone();
+        turn.network_sandbox_policy = expected_network_sandbox_policy;
+        turn.codex_linux_sandbox_exe = Some(PathBuf::from("/bin/echo"));
+
+        assert_ne!(
+            runtime_sandbox,
+            turn.config.permissions.sandbox_policy.get().clone(),
+            "test requires runtime sandbox override to differ from base config"
+        );
+
+        let config = build_review_sub_agent_config(&turn);
+
+        assert_eq!(config.cwd, runtime_cwd_path);
+        assert_eq!(config.permissions.sandbox_policy.get(), &runtime_sandbox);
+        assert_eq!(
+            config.permissions.file_system_sandbox_policy,
+            expected_file_system_sandbox_policy
+        );
+        assert_eq!(
+            config.permissions.network_sandbox_policy,
+            expected_network_sandbox_policy
+        );
+        assert_eq!(
+            config.permissions.approval_policy.value(),
+            AskForApproval::Never
+        );
+        assert_eq!(
+            config.codex_linux_sandbox_exe,
+            Some(PathBuf::from("/bin/echo"))
+        );
+    }
 }

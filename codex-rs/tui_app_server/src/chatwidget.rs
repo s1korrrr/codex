@@ -3526,10 +3526,13 @@ impl ChatWidget {
     }
 
     fn on_hook_started(&mut self, event: codex_protocol::protocol::HookStartedEvent) {
+        if !should_render_hook_started(&event.run) {
+            return;
+        }
         let label = hook_event_label(event.run.event_name);
         let mut message = format!("Running {label} hook");
         if let Some(status_message) = event.run.status_message
-            && !status_message.is_empty()
+            && !status_message.trim().is_empty()
         {
             message.push_str(": ");
             message.push_str(&status_message);
@@ -3539,6 +3542,9 @@ impl ChatWidget {
     }
 
     fn on_hook_completed(&mut self, event: codex_protocol::protocol::HookCompletedEvent) {
+        if !should_render_hook_completed(&event.run) {
+            return;
+        }
         let status = format!("{:?}", event.run.status).to_lowercase();
         let header = format!("{} hook ({status})", hook_event_label(event.run.event_name));
         let mut lines: Vec<ratatui::text::Line<'static>> = vec![header.into()];
@@ -10430,6 +10436,16 @@ impl ChatWidget {
         );
         RenderableItem::Owned(Box::new(flex))
     }
+}
+
+fn should_render_hook_started(run: &codex_protocol::protocol::HookRunSummary) -> bool {
+    run.status_message
+        .as_deref()
+        .is_some_and(|status_message| !status_message.trim().is_empty())
+}
+
+fn should_render_hook_completed(run: &codex_protocol::protocol::HookRunSummary) -> bool {
+    run.status != codex_protocol::protocol::HookRunStatus::Completed || !run.entries.is_empty()
 }
 
 #[cfg(not(target_os = "linux"))]

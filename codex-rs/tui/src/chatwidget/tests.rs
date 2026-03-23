@@ -11274,6 +11274,57 @@ async fn hook_events_render_snapshot() {
     assert_snapshot!("hook_events_render_snapshot", combined);
 }
 
+#[tokio::test]
+async fn silent_hook_events_do_not_render_history() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "hook-1".into(),
+        msg: EventMsg::HookStarted(codex_protocol::protocol::HookStartedEvent {
+            turn_id: None,
+            run: codex_protocol::protocol::HookRunSummary {
+                id: "session-start:0:/tmp/hooks.json".to_string(),
+                event_name: codex_protocol::protocol::HookEventName::SessionStart,
+                handler_type: codex_protocol::protocol::HookHandlerType::Command,
+                execution_mode: codex_protocol::protocol::HookExecutionMode::Sync,
+                scope: codex_protocol::protocol::HookScope::Thread,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+                status: codex_protocol::protocol::HookRunStatus::Running,
+                status_message: None,
+                started_at: 1,
+                completed_at: None,
+                duration_ms: None,
+                entries: vec![],
+            },
+        }),
+    });
+
+    chat.handle_codex_event(Event {
+        id: "hook-1".into(),
+        msg: EventMsg::HookCompleted(codex_protocol::protocol::HookCompletedEvent {
+            turn_id: None,
+            run: codex_protocol::protocol::HookRunSummary {
+                id: "session-start:0:/tmp/hooks.json".to_string(),
+                event_name: codex_protocol::protocol::HookEventName::SessionStart,
+                handler_type: codex_protocol::protocol::HookHandlerType::Command,
+                execution_mode: codex_protocol::protocol::HookExecutionMode::Sync,
+                scope: codex_protocol::protocol::HookScope::Thread,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+                status: codex_protocol::protocol::HookRunStatus::Completed,
+                status_message: None,
+                started_at: 1,
+                completed_at: Some(11),
+                duration_ms: Some(10),
+                entries: vec![],
+            },
+        }),
+    });
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
 // Combined visual snapshot using vt100 for history + direct buffer overlay for UI.
 // This renders the final visual as seen in a terminal: history above, then a blank line,
 // then the exec block, another blank line, the status line, a blank line, and the composer.

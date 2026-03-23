@@ -11,6 +11,7 @@ use crate::parse_command::shlex_join;
 
 const INITIAL_DELAY_MS: u64 = 200;
 const BACKOFF_FACTOR: f64 = 2.0;
+const MAX_THREAD_NAME_CHARS: usize = 120;
 
 /// Emit structured feedback metadata as key/value pairs.
 ///
@@ -224,14 +225,25 @@ pub fn resolve_path(base: &Path, path: &PathBuf) -> PathBuf {
     }
 }
 
-/// Trim a thread name and return `None` if it is empty after trimming.
+/// Normalize a thread name for persistence and display metadata.
+///
+/// The result is trimmed, collapsed to a single line via whitespace normalization, and bounded to
+/// a fixed maximum length. Returns `None` if the normalized name is empty.
 pub fn normalize_thread_name(name: &str) -> Option<String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
+    let normalized = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(truncate_thread_name(normalized))
     }
+}
+
+fn truncate_thread_name(mut name: String) -> String {
+    let Some((idx, _)) = name.char_indices().nth(MAX_THREAD_NAME_CHARS) else {
+        return name;
+    };
+    name.truncate(idx);
+    name.trim_end().to_string()
 }
 
 pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {

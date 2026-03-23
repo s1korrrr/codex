@@ -422,8 +422,16 @@ fn emit_feedback_request_tags_preserves_auth_env_fields_for_legacy_emitters() {
 }
 
 #[test]
-fn normalize_thread_name_trims_and_rejects_empty() {
+fn normalize_thread_name_collapses_whitespace_caps_length_and_rejects_empty() {
     assert_eq!(normalize_thread_name("   "), None);
+    assert_eq!(
+        normalize_thread_name("  my\tthread\nname  "),
+        Some("my thread name".to_string())
+    );
+
+    let long_name = "x".repeat(MAX_THREAD_NAME_CHARS + 25);
+    let normalized = normalize_thread_name(&long_name).expect("thread name should normalize");
+    assert_eq!(normalized.chars().count(), MAX_THREAD_NAME_CHARS);
     assert_eq!(
         normalize_thread_name("  my thread  "),
         Some("my thread".to_string())

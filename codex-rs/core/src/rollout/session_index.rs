@@ -13,6 +13,8 @@ use serde::Serialize;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 
+use crate::util::normalize_thread_name;
+
 const SESSION_INDEX_FILE: &str = "session_index.jsonl";
 const READ_CHUNK_SIZE: usize = 8192;
 
@@ -33,12 +35,18 @@ pub async fn append_thread_name(
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
 
+    let normalized_name = normalize_thread_name(name).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "thread name must not be empty after normalization",
+        )
+    })?;
     let updated_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "unknown".to_string());
     let entry = SessionIndexEntry {
         id: thread_id,
-        thread_name: name.to_string(),
+        thread_name: normalized_name,
         updated_at,
     };
     append_session_index_entry(codex_home, &entry).await
@@ -102,9 +110,11 @@ pub async fn find_thread_names_by_ids(
         let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(trimmed) else {
             continue;
         };
-        let name = entry.thread_name.trim();
-        if !name.is_empty() && thread_ids.contains(&entry.id) {
-            names.insert(entry.id, name.to_string());
+        let Some(entry) = normalize_session_index_entry(entry) else {
+            continue;
+        };
+        if thread_ids.contains(&entry.id) {
+            names.insert(entry.id, entry.thread_name);
         }
     }
 
@@ -157,6 +167,9 @@ fn scan_index_from_end_by_name(
     path: &Path,
     name: &str,
 ) -> std::io::Result<Option<SessionIndexEntry>> {
+    let Some(name) = normalize_thread_name(name) else {
+        return Ok(None);
+    };
     scan_index_from_end(path, |entry| entry.thread_name == name)
 }
 
@@ -222,10 +235,18 @@ where
     let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(trimmed) else {
         return Ok(None);
     };
+    let Some(entry) = normalize_session_index_entry(entry) else {
+        return Ok(None);
+    };
     if predicate(&entry) {
         return Ok(Some(entry));
     }
     Ok(None)
+}
+
+fn normalize_session_index_entry(mut entry: SessionIndexEntry) -> Option<SessionIndexEntry> {
+    entry.thread_name = normalize_thread_name(&entry.thread_name)?;
+    Some(entry)
 }
 
 #[cfg(test)]

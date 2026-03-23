@@ -165,3 +165,41 @@ fn scan_index_finds_latest_match_among_mixed_entries() -> std::io::Result<()> {
     assert_eq!(found_other_by_id, Some(expected_other));
     Ok(())
 }
+
+#[test]
+fn scan_index_normalizes_polluted_thread_names() -> std::io::Result<()> {
+    let temp = TempDir::new()?;
+    let path = session_index_path(temp.path());
+    let id = ThreadId::new();
+    let polluted = format!("  {}\n\t{}  ", "x".repeat(80), "y".repeat(80));
+    let expected = crate::util::normalize_thread_name(&polluted).expect("normalized thread name");
+    let lines = vec![SessionIndexEntry {
+        id,
+        thread_name: polluted,
+        updated_at: "2024-01-01T00:00:00Z".to_string(),
+    }];
+    write_index(&path, &lines)?;
+
+    let found = scan_index_from_end_by_id(&path, &id)?;
+    assert_eq!(found.map(|entry| entry.thread_name), Some(expected));
+    Ok(())
+}
+
+#[test]
+fn scan_index_by_name_matches_normalized_entries() -> std::io::Result<()> {
+    let temp = TempDir::new()?;
+    let path = session_index_path(temp.path());
+    let id = ThreadId::new();
+    let polluted = "  Investigate\n\n flaky\tthread names  ";
+    let expected = crate::util::normalize_thread_name(polluted).expect("normalized thread name");
+    let lines = vec![SessionIndexEntry {
+        id,
+        thread_name: polluted.to_string(),
+        updated_at: "2024-01-01T00:00:00Z".to_string(),
+    }];
+    write_index(&path, &lines)?;
+
+    let found = scan_index_from_end_by_name(&path, &expected)?;
+    assert_eq!(found.map(|entry| entry.id), Some(id));
+    Ok(())
+}

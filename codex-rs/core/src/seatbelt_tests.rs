@@ -65,6 +65,14 @@ fn base_policy_allows_node_cpu_sysctls() {
 }
 
 #[test]
+fn base_policy_allows_fsevents_lookup_for_directory_watchers() {
+    assert!(
+        MACOS_SEATBELT_BASE_POLICY.contains("(global-name \"com.apple.FSEvents\")"),
+        "base policy must allow FSEvents lookup so sandboxed directory fs.watch() works"
+    );
+}
+
+#[test]
 fn create_seatbelt_args_routes_network_through_proxy_ports() {
     let policy = dynamic_network_policy(
         &SandboxPolicy::new_read_only_policy(),

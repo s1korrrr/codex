@@ -94,6 +94,7 @@
 
 (allow mach-lookup
   (global-name "com.apple.PowerManagement.control")
+  (global-name "com.apple.FSEvents")
 )
 
 ; allow openpty()

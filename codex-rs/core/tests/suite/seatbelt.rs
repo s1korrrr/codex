@@ -206,6 +206,72 @@ assert os.read(master, 4) == b"ping""#
 }
 
 #[tokio::test]
+async fn directory_fs_watch_works_under_seatbelt() {
+    if std::env::var(CODEX_SANDBOX_ENV_VAR) == Ok("seatbelt".to_string()) {
+        eprintln!("{CODEX_SANDBOX_ENV_VAR} is set to 'seatbelt', skipping test.");
+        return;
+    }
+
+    let node = match which::which("node") {
+        Ok(node) => node,
+        Err(_) => {
+            eprintln!("node not found in PATH, skipping test.");
+            return;
+        }
+    };
+
+    let policy = SandboxPolicy::new_read_only_policy();
+    let command_cwd = std::env::current_dir().expect("getcwd");
+    let sandbox_cwd = command_cwd.clone();
+
+    let mut child = spawn_command_under_seatbelt(
+        vec![
+            node.to_string_lossy().to_string(),
+            "-e".to_string(),
+            r#"const fs = require("fs");
+const dir = process.argv[1];
+const watcher = fs.watch(dir);
+let done = false;
+watcher.on("error", (err) => {
+  if (done) return;
+  done = true;
+  console.error(`watch-error ${err.code} ${err.message}`);
+  process.exit(1);
+});
+setTimeout(() => {
+  if (done) return;
+  done = true;
+  watcher.close();
+  console.log("watch-ok");
+  process.exit(0);
+}, 1500);"#
+                .to_string(),
+            sandbox_cwd.to_string_lossy().to_string(),
+        ],
+        command_cwd,
+        &policy,
+        sandbox_cwd.as_path(),
+        StdioPolicy::RedirectForShellTool,
+        None,
+        HashMap::new(),
+    )
+    .await
+    .expect("should be able to spawn node under seatbelt");
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("should be able to wait for node child");
+    assert!(
+        output.status.success(),
+        "directory fs.watch under seatbelt exited with {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "watch-ok");
+}
+
+#[tokio::test]
 async fn java_home_finds_runtime_under_seatbelt() {
     if std::env::var(CODEX_SANDBOX_ENV_VAR) == Ok("seatbelt".to_string()) {
         eprintln!("{CODEX_SANDBOX_ENV_VAR} is set to 'seatbelt', skipping test.");

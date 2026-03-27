@@ -967,6 +967,39 @@ async fn approve_mode_skips_when_annotations_do_not_require_approval() {
 }
 
 #[tokio::test]
+async fn non_codex_apps_servers_skip_approval_flow_even_for_dangerous_tools() {
+    let (session, turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let turn_context = Arc::new(turn_context);
+    let invocation = McpInvocation {
+        server: "custom_server".to_string(),
+        tool: "dangerous_tool".to_string(),
+        arguments: Some(serde_json::json!({ "id": 1 })),
+    };
+    let metadata = McpToolApprovalMetadata {
+        annotations: Some(annotations(Some(false), Some(true), Some(true))),
+        connector_id: None,
+        connector_name: None,
+        connector_description: None,
+        tool_title: Some("Dangerous Tool".to_string()),
+        tool_description: Some("Performs a risky action.".to_string()),
+        codex_apps_meta: None,
+    };
+
+    let decision = maybe_request_mcp_tool_approval(
+        &session,
+        &turn_context,
+        "call-non-app",
+        &invocation,
+        Some(&metadata),
+        AppToolApproval::Auto,
+    )
+    .await;
+
+    assert_eq!(decision, None);
+}
+
+#[tokio::test]
 async fn approve_mode_blocks_when_arc_returns_interrupt_for_model() {
     use wiremock::Mock;
     use wiremock::MockServer;

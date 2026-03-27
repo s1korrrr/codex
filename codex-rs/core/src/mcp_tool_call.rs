@@ -491,6 +491,10 @@ async fn maybe_request_mcp_tool_approval(
     metadata: Option<&McpToolApprovalMetadata>,
     approval_mode: AppToolApproval,
 ) -> Option<McpToolApprovalDecision> {
+    if invocation.server != CODEX_APPS_MCP_SERVER_NAME {
+        return None;
+    }
+
     let annotations = metadata.and_then(|metadata| metadata.annotations.as_ref());
     let approval_required = annotations.is_some_and(requires_mcp_tool_approval);
     let mut monitor_reason = None;

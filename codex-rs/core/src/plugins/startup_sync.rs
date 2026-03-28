@@ -85,7 +85,8 @@ fn sync_openai_plugins_repo_via_git(codex_home: &Path, git_binary: &str) -> Resu
         return Ok(remote_sha);
     }
 
-    let cloned_repo_path = prepare_curated_repo_parent_and_temp_dir(&repo_path)?;
+    let cloned_repo_dir = prepare_curated_repo_parent_and_temp_dir(&repo_path)?;
+    let cloned_repo_path = cloned_repo_dir.path();
     let clone_output = run_git_command_with_timeout(
         Command::new(git_binary)
             .env("GIT_OPTIONAL_LOCKS", "0")
@@ -93,21 +94,21 @@ fn sync_openai_plugins_repo_via_git(codex_home: &Path, git_binary: &str) -> Resu
             .arg("--depth")
             .arg("1")
             .arg("https://github.com/openai/plugins.git")
-            .arg(&cloned_repo_path),
+            .arg(cloned_repo_path),
         "git clone curated plugins repo",
         CURATED_PLUGINS_GIT_TIMEOUT,
     )?;
     ensure_git_success(&clone_output, "git clone curated plugins repo")?;
 
-    let cloned_sha = git_head_sha(&cloned_repo_path, git_binary)?;
+    let cloned_sha = git_head_sha(cloned_repo_path, git_binary)?;
     if cloned_sha != remote_sha {
         return Err(format!(
             "curated plugins clone HEAD mismatch: expected {remote_sha}, got {cloned_sha}"
         ));
     }
 
-    ensure_marketplace_manifest_exists(&cloned_repo_path)?;
-    activate_curated_repo(&repo_path, &cloned_repo_path)?;
+    ensure_marketplace_manifest_exists(cloned_repo_path)?;
+    activate_curated_repo(&repo_path, cloned_repo_path)?;
     write_curated_plugins_sha(&sha_path, &remote_sha)?;
     Ok(remote_sha)
 }
@@ -129,11 +130,12 @@ fn sync_openai_plugins_repo_via_http(
         return Ok(remote_sha);
     }
 
-    let cloned_repo_path = prepare_curated_repo_parent_and_temp_dir(&repo_path)?;
+    let cloned_repo_dir = prepare_curated_repo_parent_and_temp_dir(&repo_path)?;
+    let cloned_repo_path = cloned_repo_dir.path();
     let zipball_bytes = runtime.block_on(fetch_curated_repo_zipball(api_base_url, &remote_sha))?;
-    extract_zipball_to_dir(&zipball_bytes, &cloned_repo_path)?;
-    ensure_marketplace_manifest_exists(&cloned_repo_path)?;
-    activate_curated_repo(&repo_path, &cloned_repo_path)?;
+    extract_zipball_to_dir(&zipball_bytes, cloned_repo_path)?;
+    ensure_marketplace_manifest_exists(cloned_repo_path)?;
+    activate_curated_repo(&repo_path, cloned_repo_path)?;
     write_curated_plugins_sha(&sha_path, &remote_sha)?;
     Ok(remote_sha)
 }
@@ -227,7 +229,7 @@ async fn write_startup_remote_plugin_sync_marker(codex_home: &Path) -> std::io::
     tokio::fs::write(marker_path, b"ok\n").await
 }
 
-fn prepare_curated_repo_parent_and_temp_dir(repo_path: &Path) -> Result<PathBuf, String> {
+fn prepare_curated_repo_parent_and_temp_dir(repo_path: &Path) -> Result<tempfile::TempDir, String> {
     let Some(parent) = repo_path.parent() else {
         return Err(format!(
             "failed to determine curated plugins parent directory for {}",
@@ -250,7 +252,7 @@ fn prepare_curated_repo_parent_and_temp_dir(repo_path: &Path) -> Result<PathBuf,
                 parent.display()
             )
         })?;
-    Ok(clone_dir.keep())
+    Ok(clone_dir)
 }
 
 fn ensure_marketplace_manifest_exists(repo_path: &Path) -> Result<(), String> {

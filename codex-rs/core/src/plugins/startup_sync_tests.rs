@@ -7,6 +7,8 @@ use crate::plugins::test_support::write_file;
 use crate::plugins::test_support::write_openai_curated_marketplace;
 use pretty_assertions::assert_eq;
 use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
 use tempfile::tempdir;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -55,24 +57,24 @@ fn sync_openai_plugins_repo_prefers_git_when_available() {
         &git_path,
         format!(
             r#"#!/bin/sh
-if [ "$1" = "ls-remote" ]; then
-  printf '%s\tHEAD\n' "{sha}"
+if [ \"$1\" = \"ls-remote\" ]; then
+  printf '%s\tHEAD\n' \"{sha}\"
   exit 0
 fi
-if [ "$1" = "clone" ]; then
-  dest="$5"
-  mkdir -p "$dest/.git" "$dest/.agents/plugins" "$dest/plugins/gmail/.codex-plugin"
-  cat > "$dest/.agents/plugins/marketplace.json" <<'EOF'
-{{"name":"openai-curated","plugins":[{{"name":"gmail","source":{{"source":"local","path":"./plugins/gmail"}}}}]}}
+if [ \"$1\" = \"clone\" ]; then
+  dest=\"$5\"
+  mkdir -p \"$dest/.git\" \"$dest/.agents/plugins\" \"$dest/plugins/gmail/.codex-plugin\"
+  cat > \"$dest/.agents/plugins/marketplace.json\" <<'EOF'
+{{\"name\":\"openai-curated\",\"plugins\":[{{\"name\":\"gmail\",\"source\":{{\"source\":\"local\",\"path\":\"./plugins/gmail\"}}}}]}}
 EOF
-  printf '%s\n' '{{"name":"gmail"}}' > "$dest/plugins/gmail/.codex-plugin/plugin.json"
+  printf '%s\n' '{{\"name\":\"gmail\"}}' > \"$dest/plugins/gmail/.codex-plugin/plugin.json\"
   exit 0
 fi
-if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] && [ "$4" = "HEAD" ]; then
-  printf '%s\n' "{sha}"
+if [ \"$1\" = \"-C\" ] && [ \"$3\" = \"rev-parse\" ] && [ \"$4\" = \"HEAD\" ]; then
+  printf '%s\n' \"{sha}\"
   exit 0
 fi
-echo "unexpected git invocation: $@" >&2
+echo \"unexpected git invocation: $@\" >&2
 exit 1
 "#
         ),
@@ -109,14 +111,14 @@ async fn sync_openai_plugins_repo_falls_back_to_http_when_git_is_unavailable() {
 
     Mock::given(method("GET"))
         .and(path("/repos/openai/plugins"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"default_branch":"main"}"#))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{\"default_branch\":\"main\"}"#))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/repos/openai/plugins/git/ref/heads/main"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_string(format!(r#"{{"object":{{"sha":"{sha}"}}}}"#)),
+                .set_body_string(format!(r#"{{\"object\":{{\"sha\":\"{sha}\"}}}}"#)),
         )
         .mount(&server)
         .await;
@@ -170,7 +172,7 @@ async fn sync_openai_plugins_repo_falls_back_to_http_when_git_sync_fails() {
     std::fs::write(
         &git_path,
         r#"#!/bin/sh
-echo "simulated git failure" >&2
+echo \"simulated git failure\" >&2
 exit 1
 "#,
     )
@@ -184,14 +186,14 @@ exit 1
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/repos/openai/plugins"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"default_branch":"main"}"#))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{\"default_branch\":\"main\"}"#))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/repos/openai/plugins/git/ref/heads/main"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_string(format!(r#"{{"object":{{"sha":"{sha}"}}}}"#)),
+                .set_body_string(format!(r#"{{\"object\":{{\"sha\":\"{sha}\"}}}}"#)),
         )
         .mount(&server)
         .await;
@@ -229,6 +231,97 @@ exit 1
     assert_eq!(read_curated_plugins_sha(tmp.path()).as_deref(), Some(sha));
 }
 
+fn staged_clone_dirs(codex_home: &Path) -> Vec<PathBuf> {
+    let tmp_root = codex_home.join(".tmp");
+    let Ok(entries) = std::fs::read_dir(&tmp_root) else {
+        return Vec::new();
+    };
+
+    let mut staged_dirs = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("plugins-clone-"))
+        })
+        .collect::<Vec<_>>();
+    staged_dirs.sort();
+    staged_dirs
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_curated_plugin_sync_cleans_up_staged_git_clone_dirs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("tempdir");
+    let bin_dir = tempfile::Builder::new()
+        .prefix("fake-git-fail-cleanup-")
+        .tempdir()
+        .expect("tempdir");
+    let git_path = bin_dir.path().join("git");
+
+    std::fs::write(
+        &git_path,
+        r#"#!/bin/sh
+echo \"simulated git failure\" >&2
+exit 1
+"#,
+    )
+    .expect("write fake git");
+    let mut permissions = std::fs::metadata(&git_path)
+        .expect("metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&git_path, permissions).expect("chmod");
+
+    let tmp_path = tmp.path().to_path_buf();
+    let err = tokio::task::spawn_blocking(move || {
+        sync_openai_plugins_repo_with_transport_overrides(
+            tmp_path.as_path(),
+            git_path.to_str().expect("utf8 path"),
+            "",
+        )
+    })
+    .await
+    .expect("sync task should join")
+    .expect_err("sync should fail when git and HTTP fallback both fail");
+
+    assert!(
+        err.contains("failed"),
+        "error should capture the failing sync path: {err}"
+    );
+    assert_eq!(
+        staged_clone_dirs(tmp.path()),
+        Vec::<PathBuf>::new(),
+        "failed sync should not leak staging dirs"
+    );
+}
+
+#[test]
+fn failed_curated_plugin_extract_cleans_up_staged_dirs() {
+    let tmp = tempdir().expect("tempdir");
+    let staged_repo_dir =
+        prepare_curated_repo_parent_and_temp_dir(&curated_plugins_repo_path(tmp.path()))
+            .expect("staged repo dir");
+    let err = extract_zipball_to_dir(b"not-a-zip-archive", staged_repo_dir.path())
+        .expect_err("invalid zip payload should fail extraction");
+
+    assert!(
+        err.contains("zip"),
+        "error should capture the extract failure: {err}"
+    );
+    drop(staged_repo_dir);
+    assert_eq!(
+        staged_clone_dirs(tmp.path()),
+        Vec::<PathBuf>::new(),
+        "failed extract should not leak staging dirs"
+    );
+}
+
 #[tokio::test]
 async fn sync_openai_plugins_repo_skips_archive_download_when_sha_matches() {
     let tmp = tempdir().expect("tempdir");
@@ -236,7 +329,7 @@ async fn sync_openai_plugins_repo_skips_archive_download_when_sha_matches() {
     std::fs::create_dir_all(repo_path.join(".agents/plugins")).expect("create repo");
     std::fs::write(
         repo_path.join(".agents/plugins/marketplace.json"),
-        r#"{"name":"openai-curated","plugins":[]}"#,
+        r#"{\"name\":\"openai-curated\",\"plugins\":[]}"#,
     )
     .expect("write marketplace");
     std::fs::create_dir_all(tmp.path().join(".tmp")).expect("create tmp");
@@ -246,14 +339,14 @@ async fn sync_openai_plugins_repo_skips_archive_download_when_sha_matches() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/repos/openai/plugins"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"default_branch":"main"}"#))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{\"default_branch\":\"main\"}"#))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/repos/openai/plugins/git/ref/heads/main"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_string(format!(r#"{{"object":{{"sha":"{sha}"}}}}"#)),
+                .set_body_string(format!(r#"{{\"object\":{{\"sha\":\"{sha}\"}}}}"#)),
         )
         .mount(&server)
         .await;
@@ -286,7 +379,7 @@ async fn startup_remote_plugin_sync_writes_marker_and_reconciles_state() {
         r#"[features]
 plugins = true
 
-[plugins."linear@openai-curated"]
+[plugins.\"linear@openai-curated\"]
 enabled = false
 "#,
     );
@@ -298,7 +391,7 @@ enabled = false
         .and(header("chatgpt-account-id", "account_id"))
         .respond_with(ResponseTemplate::new(200).set_body_string(
             r#"[
-  {"id":"1","name":"linear","marketplace_name":"openai-curated","version":"1.0.0","enabled":true}
+  {\"id\":\"1\",\"name\":\"linear\",\"marketplace_name\":\"openai-curated\",\"version\":\"1.0.0\",\"enabled\":true}
 ]"#,
         ))
         .mount(&server)
@@ -338,7 +431,7 @@ enabled = false
     );
     let config =
         std::fs::read_to_string(tmp.path().join(CONFIG_TOML_FILE)).expect("config should exist");
-    assert!(config.contains(r#"[plugins."linear@openai-curated"]"#));
+    assert!(config.contains(r#"[plugins.\"linear@openai-curated\"]"#));
     assert!(config.contains("enabled = true"));
 
     let marker_contents = std::fs::read_to_string(marker_path).expect("marker should be readable");
@@ -356,13 +449,13 @@ fn curated_repo_zipball_bytes(sha: &str) -> Vec<u8> {
     writer
         .write_all(
             br#"{
-  "name": "openai-curated",
-  "plugins": [
+  \"name\": \"openai-curated\",
+  \"plugins\": [
     {
-      "name": "gmail",
-      "source": {
-        "source": "local",
-        "path": "./plugins/gmail"
+      \"name\": \"gmail\",
+      \"source\": {
+        \"source\": \"local\",
+        \"path\": \"./plugins/gmail\"
       }
     }
   ]
@@ -376,7 +469,7 @@ fn curated_repo_zipball_bytes(sha: &str) -> Vec<u8> {
         )
         .expect("start plugin manifest entry");
     writer
-        .write_all(br#"{"name":"gmail"}"#)
+        .write_all(br#"{\"name\":\"gmail\"}"#)
         .expect("write plugin manifest");
 
     writer.finish().expect("finish zip writer").into_inner()

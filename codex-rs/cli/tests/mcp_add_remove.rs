@@ -1,4 +1,6 @@
 use std::path::Path;
+use std::process::Command;
+use std::process::Stdio;
 
 use anyhow::Result;
 use codex_core::config::load_global_mcp_servers;
@@ -11,6 +13,40 @@ fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     cmd.env("CODEX_HOME", codex_home);
     Ok(cmd)
+}
+
+fn seed_parallel_remove_config(codex_home: &Path) -> Result<()> {
+    std::fs::write(
+        codex_home.join("config.toml"),
+        r#"
+model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp@latest"]
+
+[mcp_servers.figma]
+url = "https://mcp.figma.com/mcp"
+
+[mcp_servers.linear]
+url = "https://mcp.linear.app/mcp"
+
+[mcp_servers.notion]
+url = "https://mcp.notion.com/mcp"
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["-y", "@playwright/mcp@latest"]
+
+[mcp_servers.sentry]
+url = "https://mcp.sentry.dev/mcp"
+
+[features]
+multi_agent = true
+"#,
+    )?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -173,6 +209,53 @@ async fn add_streamable_http_with_custom_env_var() -> Result<()> {
         other => panic!("unexpected transport: {other:?}"),
     }
     assert!(issues.enabled);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_mcp_remove_serializes_config_writes() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let codex_bin = codex_utils_cargo_bin::cargo_bin("codex")?;
+
+    for _ in 0..3 {
+        seed_parallel_remove_config(codex_home.path())?;
+
+        let mut children = Vec::new();
+        for name in ["figma", "notion", "playwright", "sentry"] {
+            let child = Command::new(&codex_bin)
+                .env("CODEX_HOME", codex_home.path())
+                .args(["mcp", "remove", name])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            children.push((name, child));
+        }
+
+        for (name, child) in children {
+            let output = child.wait_with_output()?;
+            assert!(
+                output.status.success(),
+                "parallel remove for {name} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains(&format!("Removed global MCP server '{name}'.")),
+                "unexpected stdout for {name}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+
+        let servers = load_global_mcp_servers(codex_home.path()).await?;
+        assert_eq!(servers.len(), 2);
+        assert!(servers.contains_key("context7"));
+        assert!(servers.contains_key("linear"));
+        assert!(!servers.contains_key("figma"));
+        assert!(!servers.contains_key("notion"));
+        assert!(!servers.contains_key("playwright"));
+        assert!(!servers.contains_key("sentry"));
+    }
+
     Ok(())
 }
 

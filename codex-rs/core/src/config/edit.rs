@@ -3,22 +3,28 @@ use crate::config::types::Notice;
 use crate::path_utils::resolve_symlink_write_paths;
 use crate::path_utils::write_atomically;
 use anyhow::Context;
+use anyhow::anyhow;
 use codex_config::CONFIG_TOML_FILE;
 use codex_features::FEATURES;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::openai_models::ReasoningEffort;
+use fd_lock::RwLock as FileRwLock;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::task;
 use toml_edit::ArrayOfTables;
 use toml_edit::DocumentMut;
 use toml_edit::Item as TomlItem;
 use toml_edit::Table as TomlTable;
 use toml_edit::value;
+
+const CONFIG_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Discrete config mutations supported by the persistence engine.
 #[derive(Clone, Debug)]
@@ -46,6 +52,13 @@ pub enum ConfigEdit {
     RecordModelMigrationSeen { from: String, to: String },
     /// Replace the entire `[mcp_servers]` table.
     ReplaceMcpServers(BTreeMap<String, McpServerConfig>),
+    /// Set or overwrite a single entry under `[mcp_servers]`.
+    SetMcpServer {
+        name: String,
+        config: McpServerConfig,
+    },
+    /// Remove a single entry under `[mcp_servers]`.
+    RemoveMcpServer { name: String },
     /// Set or clear a skill config entry under `[[skills.config]]`.
     SetSkillConfig { path: PathBuf, enabled: bool },
     /// Set trust_level under `[projects."<path>"]`,
@@ -386,6 +399,8 @@ impl ConfigDocument {
                 value(*acknowledged),
             )),
             ConfigEdit::ReplaceMcpServers(servers) => Ok(self.replace_mcp_servers(servers)),
+            ConfigEdit::SetMcpServer { name, config } => Ok(self.set_mcp_server(name, config)),
+            ConfigEdit::RemoveMcpServer { name } => Ok(self.remove_mcp_server(name)),
             ConfigEdit::SetSkillConfig { path, enabled } => {
                 Ok(self.set_skill_config(path.as_path(), *enabled))
             }
@@ -473,6 +488,71 @@ impl ConfigDocument {
             } else {
                 table.insert(name, document_helpers::serialize_mcp_server(config));
             }
+        }
+
+        true
+    }
+
+    fn set_mcp_server(&mut self, name: &str, config: &McpServerConfig) -> bool {
+        let root = self.doc.as_table_mut();
+        if !root.contains_key("mcp_servers") {
+            root.insert(
+                "mcp_servers",
+                TomlItem::Table(document_helpers::new_implicit_table()),
+            );
+        }
+
+        let Some(item) = root.get_mut("mcp_servers") else {
+            return false;
+        };
+
+        if document_helpers::ensure_table_for_write(item).is_none() {
+            *item = TomlItem::Table(document_helpers::new_implicit_table());
+        }
+
+        let Some(table) = item.as_table_mut() else {
+            return false;
+        };
+
+        if let Some(existing) = table.get_mut(name) {
+            if let TomlItem::Value(value) = existing
+                && let Some(inline) = value.as_inline_table_mut()
+            {
+                let replacement = document_helpers::serialize_mcp_server_inline(config);
+                document_helpers::merge_inline_table(inline, replacement);
+            } else {
+                *existing = document_helpers::serialize_mcp_server(config);
+            }
+        } else {
+            table.insert(name, document_helpers::serialize_mcp_server(config));
+        }
+
+        true
+    }
+
+    fn remove_mcp_server(&mut self, name: &str) -> bool {
+        let removed = {
+            let root = self.doc.as_table_mut();
+            let Some(item) = root.get_mut("mcp_servers") else {
+                return false;
+            };
+            let Some(table) = document_helpers::ensure_table_for_write(item) else {
+                return false;
+            };
+            table.remove(name).is_some()
+        };
+
+        if !removed {
+            return false;
+        }
+
+        let remove_mcp_table = self
+            .doc
+            .get("mcp_servers")
+            .and_then(|item| item.as_table())
+            .is_some_and(|table| table.is_empty());
+        if remove_mcp_table {
+            self.doc.as_table_mut().remove("mcp_servers");
         }
 
         true
@@ -711,6 +791,38 @@ pub fn apply_blocking(
 
     let config_path = codex_home.join(CONFIG_TOML_FILE);
     let write_paths = resolve_symlink_write_paths(&config_path)?;
+    let lock_path = write_paths.write_path.with_extension("toml.lock");
+    let lock_parent = lock_path.parent().ok_or_else(|| {
+        anyhow!(
+            "config lock path {} has no parent directory",
+            lock_path.display()
+        )
+    })?;
+    std::fs::create_dir_all(lock_parent)?;
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open config lock {}", lock_path.display()))?;
+    let mut config_lock = FileRwLock::new(lock_file);
+    // Serialize cross-process config writes so each editor sees the latest file
+    // state before applying its read/modify/write update.
+    let _config_guard = loop {
+        match config_lock.try_write() {
+            Ok(guard) => break guard,
+            Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(CONFIG_LOCK_POLL_INTERVAL);
+            }
+            Err(source) => {
+                return Err(anyhow!(
+                    "failed to lock config persistence at {}: {source}",
+                    lock_path.display()
+                ));
+            }
+        }
+    };
     let serialized = match write_paths.read_path {
         Some(path) => match std::fs::read_to_string(&path) {
             Ok(contents) => contents,
@@ -857,6 +969,21 @@ impl ConfigEditsBuilder {
     pub fn replace_mcp_servers(mut self, servers: &BTreeMap<String, McpServerConfig>) -> Self {
         self.edits
             .push(ConfigEdit::ReplaceMcpServers(servers.clone()));
+        self
+    }
+
+    pub fn set_mcp_server(mut self, name: &str, config: &McpServerConfig) -> Self {
+        self.edits.push(ConfigEdit::SetMcpServer {
+            name: name.to_string(),
+            config: config.clone(),
+        });
+        self
+    }
+
+    pub fn remove_mcp_server(mut self, name: &str) -> Self {
+        self.edits.push(ConfigEdit::RemoveMcpServer {
+            name: name.to_string(),
+        });
         self
     }
 

@@ -252,10 +252,6 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
     validate_server_name(&name)?;
 
     let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-    let mut servers = load_global_mcp_servers(&codex_home)
-        .await
-        .with_context(|| format!("failed to load MCP servers from {}", codex_home.display()))?;
-
     let transport = match transport_args {
         AddMcpTransportArgs {
             stdio: Some(stdio), ..
@@ -308,10 +304,8 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         oauth_resource: None,
     };
 
-    servers.insert(name.clone(), new_entry);
-
     ConfigEditsBuilder::new(&codex_home)
-        .replace_mcp_servers(&servers)
+        .set_mcp_server(&name, &new_entry)
         .apply()
         .await
         .with_context(|| format!("failed to write MCP servers to {}", codex_home.display()))?;
@@ -359,15 +353,14 @@ async fn run_remove(config_overrides: &CliConfigOverrides, remove_args: RemoveAr
     validate_server_name(&name)?;
 
     let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-    let mut servers = load_global_mcp_servers(&codex_home)
+    let removed = load_global_mcp_servers(&codex_home)
         .await
-        .with_context(|| format!("failed to load MCP servers from {}", codex_home.display()))?;
-
-    let removed = servers.remove(&name).is_some();
+        .with_context(|| format!("failed to load MCP servers from {}", codex_home.display()))?
+        .contains_key(&name);
 
     if removed {
         ConfigEditsBuilder::new(&codex_home)
-            .replace_mcp_servers(&servers)
+            .remove_mcp_server(&name)
             .apply()
             .await
             .with_context(|| format!("failed to write MCP servers to {}", codex_home.display()))?;

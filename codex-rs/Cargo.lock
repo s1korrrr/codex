@@ -1884,7 +1884,6 @@ dependencies = [
  "encoding_rs",
  "env-flags",
  "eventsource-stream",
- "fd-lock",
  "futures",
  "http 1.4.0",
  "iana-time-zone",

@@ -10,7 +10,6 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::openai_models::ReasoningEffort;
-use fd_lock::RwLock as FileRwLock;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -806,13 +805,12 @@ pub fn apply_blocking(
         .truncate(false)
         .open(&lock_path)
         .with_context(|| format!("failed to open config lock {}", lock_path.display()))?;
-    let mut config_lock = FileRwLock::new(lock_file);
     // Serialize cross-process config writes so each editor sees the latest file
     // state before applying its read/modify/write update.
-    let _config_guard = loop {
-        match config_lock.try_write() {
-            Ok(guard) => break guard,
-            Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+    loop {
+        match lock_file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {
                 std::thread::sleep(CONFIG_LOCK_POLL_INTERVAL);
             }
             Err(source) => {
@@ -822,7 +820,7 @@ pub fn apply_blocking(
                 ));
             }
         }
-    };
+    }
     let serialized = match write_paths.read_path {
         Some(path) => match std::fs::read_to_string(&path) {
             Ok(contents) => contents,

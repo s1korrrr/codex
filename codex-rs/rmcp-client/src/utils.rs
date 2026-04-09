@@ -3,9 +3,12 @@ use reqwest::ClientBuilder;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
+use reqwest::header::USER_AGENT;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
+
+use crate::MCP_CLIENT_USER_AGENT;
 
 pub(crate) fn create_env_for_mcp_server(
     extra_env: Option<HashMap<OsString, OsString>>,
@@ -82,11 +85,20 @@ pub(crate) fn apply_default_headers(
     builder: ClientBuilder,
     default_headers: &HeaderMap,
 ) -> ClientBuilder {
+    let default_headers = with_default_user_agent(default_headers);
     if default_headers.is_empty() {
         builder
     } else {
-        builder.default_headers(default_headers.clone())
+        builder.default_headers(default_headers)
     }
+}
+
+fn with_default_user_agent(default_headers: &HeaderMap) -> HeaderMap {
+    let mut headers = default_headers.clone();
+    headers
+        .entry(USER_AGENT)
+        .or_insert_with(|| HeaderValue::from_static(MCP_CLIENT_USER_AGENT));
+    headers
 }
 
 #[cfg(unix)]
@@ -210,5 +222,32 @@ mod tests {
         let env = create_env_for_mcp_server(/*extra_env*/ None, &[]);
 
         assert_eq!(env.get(OsStr::new("PATH")), Some(&expected));
+    }
+
+    #[test]
+    fn default_headers_include_mcp_user_agent_when_missing() {
+        let headers = with_default_user_agent(&HeaderMap::new());
+
+        assert_eq!(
+            headers
+                .get(USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            Some(MCP_CLIENT_USER_AGENT)
+        );
+    }
+
+    #[test]
+    fn default_headers_preserve_explicit_user_agent_override() {
+        let mut default_headers = HeaderMap::new();
+        default_headers.insert(USER_AGENT, HeaderValue::from_static("custom-agent/9.9"));
+
+        let headers = with_default_user_agent(&default_headers);
+
+        assert_eq!(
+            headers
+                .get(USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            Some("custom-agent/9.9")
+        );
     }
 }

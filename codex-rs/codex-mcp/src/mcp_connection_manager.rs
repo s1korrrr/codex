@@ -49,6 +49,7 @@ use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_rmcp_client::ElicitationResponse;
+use codex_rmcp_client::MCP_CLIENT_NAME;
 use codex_rmcp_client::RmcpClient;
 use codex_rmcp_client::SendElicitation;
 use futures::future::BoxFuture;
@@ -1402,7 +1403,7 @@ async fn start_server_task(
             tasks: None,
         },
         client_info: Implementation {
-            name: "codex-mcp-client".to_owned(),
+            name: MCP_CLIENT_NAME.to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             title: Some("Codex".into()),
             description: None,

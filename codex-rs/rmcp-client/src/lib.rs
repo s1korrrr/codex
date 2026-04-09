@@ -7,6 +7,11 @@ mod program_resolver;
 mod rmcp_client;
 mod utils;
 
+/// Client name Codex advertises in MCP initialize metadata.
+pub const MCP_CLIENT_NAME: &str = "codex-mcp-client";
+/// User-Agent Codex sends for MCP Streamable HTTP requests by default.
+pub const MCP_CLIENT_USER_AGENT: &str = concat!("codex-mcp-client/", env!("CARGO_PKG_VERSION"));
+
 pub use auth_status::StreamableHttpOAuthDiscovery;
 pub use auth_status::determine_streamable_http_auth_status;
 pub use auth_status::discover_streamable_http_oauth;
